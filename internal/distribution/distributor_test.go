@@ -479,3 +479,98 @@ func TestCloseWhilePublishing(t *testing.T) {
 		t.Fatal("publishers or reader did not stop after Close")
 	}
 }
+
+// fakeLog records appended events and can be told to fail.
+type fakeLog struct {
+	mu     sync.Mutex
+	events []domain.Event
+	fail   error
+}
+
+func (l *fakeLog) Append(ev domain.Event) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.fail != nil {
+		return l.fail
+	}
+	l.events = append(l.events, ev)
+	return nil
+}
+
+func (l *fakeLog) setFail(err error) {
+	l.mu.Lock()
+	l.fail = err
+	l.mu.Unlock()
+}
+
+func TestPublishAppendsToLogBeforeDelivery(t *testing.T) {
+	log := &fakeLog{}
+	d := distribution.New(distribution.Config{QueueSize: 8, Log: log})
+	s := mustSubscribe(t, d)
+
+	for range 3 {
+		mustPublish(t, d, trade("AAPL"))
+	}
+	for i := 1; i <= 3; i++ {
+		got := recv(t, s)
+		if logged := log.events[i-1]; logged != got {
+			t.Fatalf("delivered %+v but logged %+v", got, logged)
+		}
+	}
+}
+
+func TestPublishFailsWhenLogFails(t *testing.T) {
+	log := &fakeLog{}
+	d := distribution.New(distribution.Config{QueueSize: 8, Log: log})
+	s := mustSubscribe(t, d)
+	mustPublish(t, d, trade("AAPL"))
+	recv(t, s)
+
+	diskFull := errors.New("disk full")
+	log.setFail(diskFull)
+	if _, err := d.Publish(trade("AAPL")); !errors.Is(err, diskFull) {
+		t.Fatalf("Publish = %v, want the log error", err)
+	}
+	assertNoEvent(t, s) // nothing is delivered that is not in the log
+
+	// The failed publish did not consume a sequence number.
+	log.setFail(nil)
+	if seq := mustPublish(t, d, trade("AAPL")); seq != 2 {
+		t.Fatalf("sequence after failed append = %d, want 2", seq)
+	}
+	if ev := recv(t, s); ev.Sequence != 2 {
+		t.Fatalf("delivered sequence %d, want 2", ev.Sequence)
+	}
+}
+
+func TestStartSequence(t *testing.T) {
+	d := distribution.New(distribution.Config{StartSequence: 41})
+	if seq := mustPublish(t, d, trade("AAPL")); seq != 42 {
+		t.Fatalf("first sequence = %d, want 42", seq)
+	}
+	if st := d.Stats(); st.LastSequence != 42 {
+		t.Fatalf("LastSequence = %d, want 42", st.LastSequence)
+	}
+}
+
+func TestLogOrderMatchesSequenceUnderConcurrency(t *testing.T) {
+	log := &fakeLog{}
+	d := distribution.New(distribution.Config{QueueSize: 1 << 14, Log: log})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 1000 {
+				if _, err := d.Publish(trade("AAPL")); err != nil {
+					t.Errorf("Publish: %v", err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	for i, ev := range log.events {
+		if ev.Sequence != uint64(i+1) {
+			t.Fatalf("log entry %d has sequence %d: log order differs from sequence order", i, ev.Sequence)
+		}
+	}
+}

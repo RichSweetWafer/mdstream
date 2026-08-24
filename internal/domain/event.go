@@ -105,11 +105,18 @@ type Event struct {
 // ErrInvalidEvent is returned (wrapped) by Validate.
 var ErrInvalidEvent = errors.New("invalid event")
 
+// MaxSymbolLen is the maximum symbol length in bytes. It bounds the size of an
+// encoded event (see internal/storage).
+const MaxSymbolLen = 64
+
 // Validate checks the event's business fields. Sequence and Timestamp are not
 // checked because they are assigned during publishing.
 func (e *Event) Validate() error {
 	if e.Symbol == "" {
 		return fmt.Errorf("%w: empty symbol", ErrInvalidEvent)
+	}
+	if len(e.Symbol) > MaxSymbolLen {
+		return fmt.Errorf("%w: symbol longer than %d bytes", ErrInvalidEvent, MaxSymbolLen)
 	}
 	if e.Price <= 0 {
 		return fmt.Errorf("%w: non-positive price %s", ErrInvalidEvent, e.Price)

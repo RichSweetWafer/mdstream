@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +57,7 @@ func TestEventValidate(t *testing.T) {
 		{Symbol: "AAPL", Type: EventTypeQuote, Price: FixedScale, Quantity: FixedScale},                // quote without side
 		{Symbol: "AAPL", Type: EventTypeQuote, Side: SideAsk, Price: FixedScale, Quantity: -1},         // negative qty
 		{Symbol: "AAPL", Type: EventTypeUnknown, Price: FixedScale, Quantity: FixedScale},              // unknown type
+		{Symbol: strings.Repeat("X", MaxSymbolLen+1), Type: EventTypeTrade, Price: 1, Quantity: 1},     // symbol too long
 	}
 	for i, e := range invalid {
 		if err := e.Validate(); !errors.Is(err, ErrInvalidEvent) {

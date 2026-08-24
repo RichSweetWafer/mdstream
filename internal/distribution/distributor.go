@@ -11,10 +11,15 @@
 //   - Delivery is a non-blocking send. If a subscriber's queue is full, that
 //     subscriber is disconnected with ErrSlowConsumer instead of blocking the
 //     publisher. A slow consumer therefore never delays the others.
+//   - If an EventLog is configured, the event is appended to it inside the same
+//     critical section, before delivery. The log therefore holds exactly the
+//     stream subscribers see, in the same order, and no subscriber ever
+//     receives an event that is not in the log.
 package distribution
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -47,11 +52,25 @@ type Config struct {
 	// Now returns the timestamp assigned to events published with a zero
 	// Timestamp. Defaults to time.Now; overridable for tests.
 	Now func() time.Time
+
+	// Log, if set, receives every event before it is delivered. A failed
+	// append fails the Publish and the sequence number is not consumed.
+	Log EventLog
+
+	// StartSequence is the last sequence already used (e.g. the event log's
+	// last sequence after a restart). The first published event gets
+	// StartSequence+1.
+	StartSequence uint64
+}
+
+// EventLog persists published events. *storage.Log implements it.
+type EventLog interface {
+	Append(domain.Event) error
 }
 
 // Stats is a point-in-time snapshot of distributor counters.
 type Stats struct {
-	LastSequence            uint64 // also the number of events published
+	LastSequence            uint64 // sequence of the last published event
 	Delivered               uint64 // successful enqueues, summed over subscribers
 	Subscribers             int    // currently active subscriptions
 	SlowConsumerDisconnects uint64
@@ -62,6 +81,7 @@ type Stats struct {
 type Distributor struct {
 	queueSize int
 	now       func() time.Time
+	log       EventLog
 
 	mu         sync.Mutex
 	seq        uint64
@@ -84,6 +104,8 @@ func New(cfg Config) *Distributor {
 	return &Distributor{
 		queueSize:  cfg.QueueSize,
 		now:        cfg.Now,
+		log:        cfg.Log,
+		seq:        cfg.StartSequence,
 		publishing: true,
 	}
 }
@@ -113,7 +135,7 @@ func (d *Distributor) Subscribe() (*Subscription, error) {
 // ErrSlowConsumer.
 //
 // It returns the assigned sequence number, ErrClosed if publishing has
-// stopped, or an error wrapping domain.ErrInvalidEvent.
+// stopped, an error wrapping domain.ErrInvalidEvent, or the event log's error.
 func (d *Distributor) Publish(ev domain.Event) (uint64, error) {
 	if err := ev.Validate(); err != nil {
 		return 0, err
@@ -125,11 +147,16 @@ func (d *Distributor) Publish(ev domain.Event) (uint64, error) {
 		return 0, ErrClosed
 	}
 
-	d.seq++
-	ev.Sequence = d.seq
+	ev.Sequence = d.seq + 1
 	if ev.Timestamp == 0 {
 		ev.Timestamp = d.now().UnixNano()
 	}
+	if d.log != nil {
+		if err := d.log.Append(ev); err != nil {
+			return 0, fmt.Errorf("distribution: event log: %w", err)
+		}
+	}
+	d.seq = ev.Sequence
 
 	for i := 0; i < len(d.subs); {
 		s := d.subs[i]

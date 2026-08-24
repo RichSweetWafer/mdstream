@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"mdstream/internal/app"
+	"mdstream/internal/storage"
 )
 
 func main() {
@@ -30,6 +32,19 @@ func run() error {
 	flag.BoolVar(&cfg.Producer.Enabled, "producer", cfg.Producer.Enabled, "run the built-in synthetic producer")
 	flag.IntVar(&cfg.Producer.Rate, "rate", cfg.Producer.Rate, "producer rate in events/sec (0 = unlimited)")
 	flag.Uint64Var(&cfg.Producer.Seed, "seed", cfg.Producer.Seed, "producer random seed")
+
+	flag.StringVar(&cfg.Storage.DataDir, "data-dir", cfg.Storage.DataDir, "event log directory (empty = no persistence)")
+	flag.Func("segment-size", "event log segment size, e.g. 256MB, 64KB or bytes (default 256MB)", func(s string) error {
+		n, err := parseSize(s)
+		cfg.Storage.SegmentSize = n
+		return err
+	})
+	flag.Func("durability", "event log durability: write (write-through + periodic fsync), fsync (every event) or buffered (default write)", func(s string) error {
+		d, err := storage.ParseDurability(s)
+		cfg.Storage.Durability = d
+		return err
+	})
+	flag.DurationVar(&cfg.Storage.SyncInterval, "sync-interval", cfg.Storage.SyncInterval, "event log fsync interval for write and buffered durability")
 
 	symbols := flag.String("symbols", strings.Join(cfg.Producer.Symbols, ","), "comma-separated producer symbols")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
@@ -52,6 +67,26 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return a.Run(ctx)
+}
+
+// parseSize parses a byte size: plain bytes or a KB/MB/GB suffix (powers of 1024).
+func parseSize(s string) (int64, error) {
+	s = strings.ToUpper(strings.TrimSpace(s))
+	mult := int64(1)
+	for _, u := range []struct {
+		suffix string
+		mult   int64
+	}{{"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10}, {"B", 1}} {
+		if rest, ok := strings.CutSuffix(s, u.suffix); ok {
+			s, mult = strings.TrimSpace(rest), u.mult
+			break
+		}
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	return n * mult, nil
 }
 
 func splitSymbols(s string) []string {
