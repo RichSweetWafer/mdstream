@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package mdstream.v1;
+
+option go_package = "mdstream/api/gen/mdstream/v1;mdstreamv1";
+
+// MarketData streams live market-data events to subscribers.
+service MarketData {
+  // Subscribe opens a live event stream. Every subscriber receives the same
+  // stream, ordered by sequence number.
+  //
+  // The stream ends with:
+  //   RESOURCE_EXHAUSTED - the client fell behind and its server-side queue overflowed;
+  //   UNAVAILABLE        - the server is shutting down.
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
+
+message SubscribeRequest {
+  // Free-form client identifier, used for logging only.
+  string client_id = 1;
+
+  // Reserved for sequence-based recovery (later stage): resume after this sequence.
+  reserved 2;
+  reserved "from_sequence";
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_TRADE = 1;
+  EVENT_TYPE_QUOTE = 2;
+}
+
+enum Side {
+  SIDE_UNSPECIFIED = 0; // trades
+  SIDE_BID = 1;
+  SIDE_ASK = 2;
+}
+
+message Event {
+  // Monotonically increasing, assigned by the server. Starts at 1.
+  uint64 sequence = 1;
+  // Ingestion time, Unix nanoseconds.
+  int64 timestamp_unix_nano = 2;
+  string symbol = 3;
+  EventType type = 4;
+  Side side = 5;
+  // Fixed-point decimals with 8 fractional digits: 1.5 is encoded as 150000000.
+  int64 price = 6;
+  int64 quantity = 7;
+}
